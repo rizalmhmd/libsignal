@@ -19,7 +19,6 @@ function assertBuffer(value) {
     return value;
 }
 
-
 class SessionCipher {
 
     constructor(storage, protocolAddress) {
@@ -49,6 +48,15 @@ class SessionCipher {
         const record = await this.storage.loadSession(this.addr.toString());
         if (record && !(record instanceof SessionRecord)) {
             throw new TypeError('SessionRecord type expected from loadSession'); 
+        }
+        return record;
+    }
+
+    async getRecordOrCreate() {
+        let record = await this.getRecord();
+        if (!record) {
+            record = new SessionRecord();
+            await this.storeRecord(record);
         }
         return record;
     }
@@ -137,7 +145,7 @@ class SessionCipher {
     async decryptWithSessions(data, sessions) {
         // Iterate through the sessions, attempting to decrypt using each one.
         // Stop and return the result if we get a valid result.
-        if (!sessions.length) {
+        if (!sessions || !sessions.length) {
             throw new errors.SessionError("No sessions available");
         }   
         const errs = [];
@@ -164,7 +172,11 @@ class SessionCipher {
             if (!record) {
                 throw new errors.SessionError("No session record");
             }
-            const result = await this.decryptWithSessions(data, record.getSessions());
+            const sessions = record.getSessions();
+            if (!sessions || !sessions.length) {
+                throw new errors.SessionError("No sessions available for decryption");
+            }
+            const result = await this.decryptWithSessions(data, sessions);
             const remoteIdentityKey = result.session.indexInfo.remoteIdentityKey;
             if (!await this.storage.isTrustedIdentity(this.addr.id, remoteIdentityKey)) {
                 throw new errors.UntrustedIdentityKeyError(this.addr.id, remoteIdentityKey);
@@ -200,6 +212,9 @@ class SessionCipher {
             const builder = new SessionBuilder(this.storage, this.addr);
             const preKeyId = await builder.initIncoming(record, preKeyProto);
             const session = record.getSession(preKeyProto.baseKey);
+            if (!session) {
+                throw new errors.SessionError("Failed to create session from PreKey message");
+            }
             const plaintext = await this.doDecryptWhisperMessage(preKeyProto.message, session);
             await this.storeRecord(record);
             if (preKeyId) {
@@ -222,6 +237,9 @@ class SessionCipher {
         const message = protobufs.WhisperMessage.decode(messageProto);
         this.maybeStepRatchet(session, message.ephemeralKey, message.previousCounter);
         const chain = session.getChain(message.ephemeralKey);
+        if (!chain) {
+            throw new errors.SessionError("No chain found for ephemeral key");
+        }
         if (chain.chainType === ChainType.SENDING) {
             throw new Error("Tried to decrypt on a sending chain");
         }
@@ -325,6 +343,22 @@ class SessionCipher {
                     await this.storeRecord(record);
                 }
             }
+        });
+    }
+
+    // Metode baru untuk membantu debugging
+    async debugGetSessionInfo() {
+        return await this.queueJob(async () => {
+            const record = await this.getRecord();
+            if (!record) {
+                return { exists: false, sessions: 0, openSession: false };
+            }
+            const sessions = record.getSessions();
+            return {
+                exists: true,
+                sessions: sessions ? sessions.length : 0,
+                openSession: record.haveOpenSession()
+            };
         });
     }
 }
